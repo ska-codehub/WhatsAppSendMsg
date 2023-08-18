@@ -41,17 +41,14 @@ FALSY = [
 
 BASE_DIR = Path("./")
 CONFIGURATION_FILE = BASE_DIR / 'settings.config'
-DATA_DIR = BASE_DIR / "data"
 CHROME_DIR = BASE_DIR / "chrome"
 USER_DATA_DIR = CHROME_DIR / "user-data"
 CONTACT_FOLDER_PATH = BASE_DIR / "contacts"
-CONTACT_NUMBER_COLUMN_NAME = "contact_number"
-CONTACT_NAME_COLUMN_NAME = "name"
 
 
-DATA_DIR.mkdir(exist_ok=True)
 CHROME_DIR.mkdir(exist_ok=True)
 USER_DATA_DIR.mkdir(exist_ok=True)
+CONTACT_FOLDER_PATH.mkdir(exist_ok=True)
 
 config = configparser.RawConfigParser()
 config.read(CONFIGURATION_FILE)
@@ -65,6 +62,8 @@ LOGIN_URL = SETTINGS.get('login_url').strip()
 LOGIN_TITLE = SETTINGS.get('login_title').strip()
 LOGIN_REDIRECT_TITLE = SETTINGS.get('login_redirect_title').strip()
 SEND_URL = SETTINGS.get('send_url').strip()
+CONTACT_NUMBER_COLUMN_NAME = SETTINGS.get('message_file').strip()
+CONTACT_NAME_COLUMN_NAME = SETTINGS.get('message_file').strip()
 MESSAGE_FILE = BASE_DIR / SETTINGS.get('message_file').strip()
 
 HEALTH_CHECK_URL = SETTINGS.get('health_check_url').strip()
