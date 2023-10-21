@@ -3,78 +3,30 @@
 
 import os
 import sys
-import shutil
 import signal
 import psutil
 from contextlib import suppress
-import configparser
 import argparse
-from pathlib import Path
 import time
 import random
+import tempfile
+import shutil
 import pandas as pd
 import urllib
+from weakref import finalize
 from selenium import webdriver
 from selenium.webdriver.support.wait import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.common.by import By
-from selenium.webdriver.common.keys import Keys
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.service import utils
+from selenium.webdriver.chromium.service import ChromiumService
+from selenium.webdriver.chromium.options import ChromiumOptions
+from dprocess import start_detached
+from patcher import Patcher
+from settings import *
 import traceback
 
-TRUTHY = [
-    'TRUE', 'True', 'true', 'T', 't', True,
-    '1', 1,
-    'ON', 'On', 'on',
-    'YES', 'Yes', 'yes', 'Y', 'y'
-]
-
-
-FALSY = [
-    'FALSE', 'False', 'false', 'F', 'f', False,
-    '0', 0,
-    'OFF', 'Off', 'off',
-    'NO', 'No', 'no', 'N', 'n'
-]
-
-BASE_DIR = Path("./")
-CONFIGURATION_FILE = BASE_DIR / 'settings.config'
-CHROME_DIR = BASE_DIR / "chrome"
-USER_DATA_DIR = CHROME_DIR / "user-data"
-CONTACT_FOLDER_PATH = BASE_DIR / "contacts"
-
-
-CHROME_DIR.mkdir(exist_ok=True)
-USER_DATA_DIR.mkdir(exist_ok=True)
-CONTACT_FOLDER_PATH.mkdir(exist_ok=True)
-
-config = configparser.RawConfigParser()
-config.read(CONFIGURATION_FILE)
-SETTINGS = dict(config.items('settings'))
-
-PROJECT_NAME = SETTINGS.get('project_name').strip()
-PROJECT_DESCRIPTION = SETTINGS.get('project_description').strip()
-VERSION = SETTINGS.get('version').strip()
-SITE_DOMAIN = SETTINGS.get('site_domain').strip()
-LOGIN_URL = SETTINGS.get('login_url').strip()
-LOGIN_TITLE = SETTINGS.get('login_title').strip()
-LOGIN_REDIRECT_TITLE = SETTINGS.get('login_redirect_title').strip()
-SEND_URL = SETTINGS.get('send_url').strip()
-CONTACT_NUMBER_COLUMN_NAME = SETTINGS.get('message_file').strip()
-CONTACT_NAME_COLUMN_NAME = SETTINGS.get('message_file').strip()
-MESSAGE_FILE = BASE_DIR / SETTINGS.get('message_file').strip()
-
-HEALTH_CHECK_URL = SETTINGS.get('health_check_url').strip()
-HEALTH_CHECK_TITLE = SETTINGS.get('health_check_title').strip()
-
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36 Edg/114.0.5735.90",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36", 
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/107.0.0.0 Safari/537.36",
-]
 
 
 def confirmation_input(ask_str, ask_type):
@@ -97,60 +49,112 @@ def confirmation_input(ask_str, ask_type):
 
 
 class WhatsAppSendMsg:
-    def __init__(self,invisible=False) -> None:
+    def __init__(self, invisible=True, debug=False) -> None:
+        finalize(self, self.kill_browser_process)
         self.invisible = invisible
-        self.user_agent = USER_AGENTS[random.randrange(0, len(USER_AGENTS)-1)]
-        self.page_load_timeout = 60
+        self.debug = debug
         self.not_ok = 0
         self.retry = 0
         self.max_retries = 3
+        self.browser_pid = None
 
     def is_head_ready(self):
+        ready = False
         try:
             WebDriverWait(self.browser, 20).until(EC.presence_of_element_located((By.TAG_NAME, "head")))
-            return self.browser.find_element(By.TAG_NAME, "head") is not None 
+            ready = self.browser.find_element(By.TAG_NAME, "head") is not None 
         except Exception as e:
             print("WhatsAppSendMsg.is_head_ready Error: ", e, traceback.format_exc())
-            return False
-    
+        print("Head Ready?: ", "Yes" if ready else "No")
+        return ready
+
+    def scroll(self):
+        try:
+            print("Scrolling...")
+            scroll_height = self.browser.execute_script("return document.body.scrollHeight;")
+            start_time = time.time()
+            old_scroll_height = None
+            while True:
+                i = 10
+                while i>0:
+                    self.browser.execute_script(f"window.scrollTo(0, {scroll_height/i});")
+                    time.sleep(random.randrange(3, 5)/100)
+                    i -= 1
+                    if time.time() - start_time >= self.scroll_timeout:
+                        break
+                time.sleep(random.randrange(3, 5)/100)
+                new_scroll_height = self.browser.execute_script("return document.body.scrollHeight;")
+                if new_scroll_height==scroll_height:
+                    break
+                if old_scroll_height is None or old_scroll_height!=new_scroll_height:
+                    old_scroll_height = new_scroll_height
+                else:
+                    break                
+                if time.time() - start_time >= self.scroll_timeout:
+                    break
+        except:
+            pass
+        finally:
+            self.browser.execute_script("window.scrollTo(0, 0);")
+            time.sleep(0.5)
+
     def is_dom_ready(self):
+        ready = False
         try:
             time.sleep(0.5)
             WebDriverWait(self.browser, 20).until(EC.presence_of_element_located((By.TAG_NAME, "body")))                
             try:
-                self.browser.execute_script(f'window.scrollTo(0, {random.randrange(100, 1000)})')
+                self.scroll()
             except:
                 pass
-            return self.browser.find_element(By.TAG_NAME, "body") is not None
+            ready = self.browser.find_element(By.TAG_NAME, "body") is not None
         except Exception as e:
             print("WhatsAppSendMsg.is_dom_ready Error: ", e, traceback.format_exc())
-            return False        
+        print("Dom Ready?: ", "Yes" if ready else "No")
+        return ready        
 
-    def is_title_valid(self, title=""):
-        try:
-            return self.browser.title==title or self.browser.title.strip()==title.strip()
-        except Exception as e:
-            print("WhatsAppSendMsg.is_title_valid Error: ", e, traceback.format_exc())
-            return False
-        
-    def is_page_ready(self, title):
-        ready = False
-        for _ in range(0, 3):
+    def is_title_valid(self, title=None, invalid_title=None):
+        valid = False
+        print(f"Checking Title {title}")
+        if title is None or title=="":
+            if invalid_title is not None:
+                try:
+                    WebDriverWait(self.browser, 1).until(EC.title_contains(invalid_title.strip()))
+                except TimeoutException:
+                    valid = True
+
+                if not valid:
+                    print("BOT DETECTED")
+            else:
+                valid = True
+        else:
             try:
-                time.sleep(1)
-                ready = self.is_head_ready() and self.is_dom_ready() and self.is_title_valid(title)
+                WebDriverWait(self.browser, 15).until(EC.title_contains(title.strip()))
+                valid = True
+            except TimeoutException:
+                pass
+        print("Is Title Valid?: ", "Yes" if valid else "No")
+        return valid
+        
+    def is_page_ready(self, title=None, invalid_title=None, max_try=3):
+        print("Is Page Ready?")
+        ready = False
+        for _ in range(0, max_try):
+            try:
+                ready = self.is_head_ready() and self.is_dom_ready() and self.is_title_valid(title=title, invalid_title=invalid_title)
                 if ready:
                     break
             except:
                 ready = False
+        print("Page Ready Status:", "Yes" if ready else "No")
         return ready
 
 
-    def get_page(self, url, title=None):
+    def get_page(self, url, title=None, invalid_title=None):
         try:
             self.browser.get(url)
             time.sleep(1)
-            return self.is_page_ready(title)
+            return self.is_page_ready(title=title, invalid_title=invalid_title)
         except TimeoutException as e:
             print("WhatsAppSendMsg.get_page Error1: ", e, traceback.format_exc())
             if self.retry<=self.max_retries:
@@ -172,8 +176,9 @@ class WhatsAppSendMsg:
             self.not_ok += 1
             print("NOT OK")
             return False
+
     
-    def kill_browser_process(self):     
+    def kill_browser_process(self, all=False):     
         try:
             if hasattr(self, "browser") and self.browser is not None:
                 print("Killing browser instances and process")
@@ -199,22 +204,42 @@ class WhatsAppSendMsg:
                 except:
                     pass
             try:
-                for process in psutil.process_iter():
-                    try:
-                        if process.name() == "chrome.exe" \
-                            and "--test-type=webdriver" in process.cmdline():
-                            with suppress(psutil.NoSuchProcess):
-                                try:
-                                    os.kill(process.pid, signal.SIGTERM)
-                                except:
-                                    pass
-                    except:
-                        pass
+                self.browser.service.process.kill()
             except:
                 pass
+
+            if all:
+                try:
+                    for process in psutil.process_iter():
+                        try:
+                            if process.name() == "chrome.exe" \
+                                and "--test-type=webdriver" in process.cmdline():
+                                with suppress(psutil.NoSuchProcess):
+                                    try:
+                                        os.kill(process.pid, signal.SIGTERM)
+                                    except:
+                                        pass
+                        except:
+                            pass
+                except:
+                    pass
         except:
             pass
-        
+
+        try:
+            if self.browser_pid is not None:
+                os.kill(self.browser_pid, signal.SIGTERM)
+        except:
+            pass
+        finally:
+            try:
+                if self.browser_pid is not None:
+                    from dprocess import REGISTERED
+                    if self.browser_pid in REGISTERED:
+                        REGISTERED.remove(self.browser_pid)
+            except:
+                pass        
+
         if hasattr(self, "browser"):
             if self.browser is None or not hasattr(self.browser, "service") or self.browser.service:
                 print("Browser closed and webdriver process killed!")
@@ -223,52 +248,236 @@ class WhatsAppSendMsg:
                 print("Browser and Webdriver process NOT killed !!!!")
 
 
-    def config_browser(self, *args, **kwargs):
+    def _configure_headless(self):
+        orig_get = self.browser.get
+        print("setting properties for headless")
+
+        def get_wrapped(*args, **kwargs):
+            if self.browser.execute_script("return navigator.webdriver"):
+                print("patch navigator.webdriver")
+                self.browser.execute_cdp_cmd(
+                    "Page.addScriptToEvaluateOnNewDocument",
+                    {
+                        "source": """
+
+                           Object.defineProperty(window, "navigator", {
+                                Object.defineProperty(window, "navigator", {
+                                  value: new Proxy(navigator, {
+                                    has: (target, key) => (key === "webdriver" ? false : key in target),
+                                    get: (target, key) =>
+                                      key === "webdriver"
+                                        ? false
+                                        : typeof target[key] === "function"
+                                        ? target[key].bind(target)
+                                        : target[key],
+                                  }),
+                                });
+                    """
+                    },
+                )
+
+                print("patch user-agent string")
+                self.browser.execute_cdp_cmd(
+                    "Network.setUserAgentOverride",
+                    {
+                        "userAgent": self.browser.execute_script(
+                            "return navigator.userAgent"
+                        ).replace("Headless", "")
+                    },
+                )
+                self.browser.execute_cdp_cmd(
+                    "Page.addScriptToEvaluateOnNewDocument",
+                    {
+                        "source": """
+                            Object.defineProperty(navigator, 'maxTouchPoints', {get: () => 1});
+                            Object.defineProperty(navigator.connection, 'rtt', {get: () => 100});
+                            window.chrome = {
+                                app: {
+                                    isInstalled: false,
+                                    InstallState: {
+                                        DISABLED: 'disabled',
+                                        INSTALLED: 'installed',
+                                        NOT_INSTALLED: 'not_installed'
+                                    },
+                                    RunningState: {
+                                        CANNOT_RUN: 'cannot_run',
+                                        READY_TO_RUN: 'ready_to_run',
+                                        RUNNING: 'running'
+                                    }
+                                },
+                                runtime: {
+                                    OnInstalledReason: {
+                                        CHROME_UPDATE: 'chrome_update',
+                                        INSTALL: 'install',
+                                        SHARED_MODULE_UPDATE: 'shared_module_update',
+                                        UPDATE: 'update'
+                                    },
+                                    OnRestartRequiredReason: {
+                                        APP_UPDATE: 'app_update',
+                                        OS_UPDATE: 'os_update',
+                                        PERIODIC: 'periodic'
+                                    },
+                                    PlatformArch: {
+                                        ARM: 'arm',
+                                        ARM64: 'arm64',
+                                        MIPS: 'mips',
+                                        MIPS64: 'mips64',
+                                        X86_32: 'x86-32',
+                                        X86_64: 'x86-64'
+                                    },
+                                    PlatformNaclArch: {
+                                        ARM: 'arm',
+                                        MIPS: 'mips',
+                                        MIPS64: 'mips64',
+                                        X86_32: 'x86-32',
+                                        X86_64: 'x86-64'
+                                    },
+                                    PlatformOs: {
+                                        ANDROID: 'android',
+                                        CROS: 'cros',
+                                        LINUX: 'linux',
+                                        MAC: 'mac',
+                                        OPENBSD: 'openbsd',
+                                        WIN: 'win'
+                                    },
+                                    RequestUpdateCheckStatus: {
+                                        NO_UPDATE: 'no_update',
+                                        THROTTLED: 'throttled',
+                                        UPDATE_AVAILABLE: 'update_available'
+                                    }
+                                }
+                            }
+
+                            // https://github.com/microlinkhq/browserless/blob/master/packages/goto/src/evasions/navigator-permissions.js
+                            if (!window.Notification) {
+                                window.Notification = {
+                                    permission: 'denied'
+                                }
+                            }
+
+                            const originalQuery = window.navigator.permissions.query
+                            window.navigator.permissions.__proto__.query = parameters =>
+                                parameters.name === 'notifications'
+                                    ? Promise.resolve({ state: window.Notification.permission })
+                                    : originalQuery(parameters)
+
+                            const oldCall = Function.prototype.call
+                            function call() {
+                                return oldCall.apply(this, arguments)
+                            }
+                            Function.prototype.call = call
+
+                            const nativeToStringFunctionString = Error.toString().replace(/Error/g, 'toString')
+                            const oldToString = Function.prototype.toString
+
+                            function functionToString() {
+                                if (this === window.navigator.permissions.query) {
+                                    return 'function query() { [native code] }'
+                                }
+                                if (this === functionToString) {
+                                    return nativeToStringFunctionString
+                                }
+                                return oldCall.call(oldToString, this)
+                            }
+                            // eslint-disable-next-line
+                            Function.prototype.toString = functionToString
+                            """
+                    },
+                )
+            return orig_get(*args, **kwargs)
+        self.browser.get = get_wrapped
+
+
+    def find_chrome_executable(self):
+        candidates = set()
+        if IS_POSIX:
+            for item in os.environ.get("PATH").split(os.pathsep):
+                for subitem in (
+                    "google-chrome",
+                    "chromium",
+                    "chromium-browser",
+                    "chrome",
+                    "google-chrome-stable",
+                ):
+                    candidates.add(os.sep.join((item, subitem)))
+            if "darwin" in sys.platform:
+                candidates.update(
+                    [
+                        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+                        "/Applications/Chromium.app/Contents/MacOS/Chromium",
+                    ]
+                )
+        else:
+            for item in map(
+                os.environ.get,
+                ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA", "PROGRAMW6432"),
+            ):
+                if item is not None:
+                    for subitem in (
+                        "Google/Chrome/Application",
+                    ):
+                        candidates.add(os.sep.join((item, subitem, "chrome.exe")))
+        for candidate in candidates:
+            print('checking if %s exists and is executable' % candidate)
+            if os.path.exists(candidate) and os.access(candidate, os.X_OK):
+                print('found! using %s' % candidate)
+                return os.path.normpath(candidate)
+
+
+    def config_browser(self):
         print("Configuring browser...")
-        chrome_driver_path = CHROME_DIR / 'chromedriver.exe'
-        self.kill_browser_process()
-        options = Options()
-        options.page_load_strategy = "none"
-        options.add_argument("--start-maximized")
-        options.add_argument("--ignore-gpu-blacklist")
-        options.add_argument("--use-gl")
-        options.add_argument("--allow-insecure-localhost")
-        options.add_argument("--allow-running-insecure-content")
-        options.add_argument("--ignore-ssl-errors=yes")
-        options.add_argument("--ignore-certificate-errors")
-        options.add_argument("--block-insecure-private-network-requests=false")
-        options.add_argument(f"--unsafely-treat-insecure-origin-as-secure={SITE_DOMAIN}")
-        options.add_argument("--safebrowsing-disable-download-protection")
-        options.add_argument("--disable-gpu")
+        chrome_driver_filename = 'undetected_chromedriver'
+        if not IS_POSIX:
+            chrome_driver_filename += '.exe'
+        chrome_driver_path = CHROME_DIR / chrome_driver_filename
+        self.patcher = Patcher(user_multi_procs=True)
+        self.patcher.auto(executable_path=chrome_driver_path)
+        options = ChromiumOptions()
+        # options.page_load_strategy = "normal"
+        options.add_argument("--disable-extensions")
+        options.add_argument("--lang=en-IN")
+        options.arguments.extend(["--no-default-browser-check", "--no-first-run"])
+        options.arguments.extend(["--no-sandbox", "--test-type"])
         if self.invisible:
             print("Configuring browser with invisible mode!")
-            options.add_argument("--headless")
+            options.add_argument("--headless=new")
+            if self.debug:
+                debug_host = "127.0.0.1"
+                debug_port = utils.free_port()
+                options.add_argument(f"--remote-debugging-host={debug_host}")
+                options.add_argument(f"--remote-debugging-port={debug_port}")
+                options.debugger_address = "%s:%d" % (debug_host, debug_port)
         else:
             print("Configuring browser with visible mode!")
+        options.add_argument("--window-size=1920,1080")
+        options.add_argument("--start-maximized")
         options.add_argument("--no-sandbox")
-        options.add_argument("--disable-dev-shm-usage")
-        options.add_argument(f"user-agent={self.user_agent}")
-        options.add_argument("--kiosk-printing")
-        options.add_argument("--disable-blink-features")
         options.add_argument("--disable-blink-features=AutomationControlled")
-        options.add_argument("--disable-notifications")
-        options.add_argument(f"user-data-dir={USER_DATA_DIR.absolute()}")
-        options.set_capability("acceptInsecureCerts", True)
-        options.add_experimental_option("useAutomationExtension", False)
-        options.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
-        prefs = {
-            "profile.default_content_setting_values.notifications" : 2,
-            "safebrowsing_for_trusted_sources_enabled" : False,
-            "safebrowsing.enabled" : False,
-            "profile.exit_type" : "Normal"
-        }
-        options.add_experimental_option("prefs", prefs)
+        options.add_argument("--disable-infobars")
+        user_data_dir = os.path.normpath(tempfile.mkdtemp())
+        options.add_argument(f"user-data-dir={user_data_dir}")
+        # options.add_experimental_option("useAutomationExtension", False)
+        # options.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
         os.environ["webdriver.chrome.driver"] = str(chrome_driver_path.absolute())
-        service = Service(executable_path=chrome_driver_path, service_args=["--verbose"])
-        self.browser = webdriver.Chrome(service=service, options=options)
-        self.browser.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-        self.browser.execute_cdp_cmd("Network.setUserAgentOverride", {"userAgent":self.user_agent})
-        self.browser.set_page_load_timeout(self.page_load_timeout)
+        
+        desired_capabilities = options.to_capabilities()
+        # print("desired_capabilities: ", desired_capabilities)
+
+        binary_location = self.find_chrome_executable()
+        if binary_location is not None:
+            options.binary_location = binary_location
+            self.browser_pid = start_detached(
+                options.binary_location, *options.arguments
+            )
+
+        service = ChromiumService(executable_path=chrome_driver_path)
+        self.browser = webdriver.chrome.webdriver.WebDriver(service=service, options=options, keep_alive=True)
+        self.browser._delay = 3
+        self.browser.user_data_dir = user_data_dir
+        self.browser.keep_user_data_dir = False
+        if self.invisible:
+            self._configure_headless()
+        # self.browser.set_page_load_timeout(self.page_load_timeout)
         self.browser.maximize_window()
         print("browserVersion: ", self.browser.capabilities["browserVersion"])
         print("chromedriverVersion: ", self.browser.capabilities["chrome"]["chromedriverVersion"].split(" ")[0])
@@ -277,20 +486,40 @@ class WhatsAppSendMsg:
             if self.retry<=self.max_retries:
                 self.config_browser()
             else:
-                raise Exception("Failed to configure browser. Possible reason: Blocked Proxy server")
+                raise Exception("Failed to configure browser.")
         else:
             self.retry = 0
 
-        
+
+    def get_prensented_elements(self, by_tuple):
+        els = []
+        try:
+            els = WebDriverWait(self.browser, 10).until(EC.presence_of_all_elements_located(by_tuple))
+        except Exception as e:
+            print(f"WhatsAppSendMsg.get_clickable_element {e}")
+            els = []
+        return els
+
     def get_clickable_element(self, by_tuple):
         el = None
+        error = ""
+        sep = ""
         try:
-            el = WebDriverWait(self.browser, 20).until(EC.presence_of_element_located(by_tuple))
-            el1 = WebDriverWait(self.browser, 10).until(EC.element_to_be_clickable(by_tuple))
+            els = self.get_prensented_elements(by_tuple=by_tuple)
+            if len(els)>0:
+                el = els[0]
+        except Exception as e:
+            error += f"Error1: {e}"
+            sep = "\n"
+        try:
+            el1 = WebDriverWait(self.browser, 20).until(EC.element_to_be_clickable(by_tuple))
             if el1 is not None:
                 el = el1
         except Exception as e:
-            print("WhatsAppSendMsg.get_clickable_element Error: ", e)
+            error += f"{sep}Error2: {e}"
+        if len(error)>0:
+            error = f"WhatsAppSendMsg.get_clickable_element {error}"
+            print(error)
         return el
 
     def cleanup_session_login(self):
@@ -307,8 +536,8 @@ class WhatsAppSendMsg:
     def login(self):
         if self.get_page(LOGIN_URL, LOGIN_TITLE):
             time.sleep(3)
-            qrcode_el = self.browser.find_elements(By.XPATH, "//div[@data-testid='qrcode']")
-            if len(qrcode_el)==0:
+            initial_startup_el = self.browser.find_elements(By.XPATH, "//div[@id='initial_startup']")
+            if len(initial_startup_el)==0:
                 landing_title_el = self.browser.find_elements(By.XPATH, "//div[@class='landing-title']")
                 if len(landing_title_el)>0:
                     self.browser.refresh()
@@ -318,8 +547,8 @@ class WhatsAppSendMsg:
             print("Please scan the QR Code to login!")
             while True:
                 if confirmation_input("Done with scanning QR code?", 'y/N')==True:
-                    qrcode_el = self.browser.find_elements(By.XPATH, "//div[@data-testid='qrcode']")
-                    if len(qrcode_el)==0:
+                    initial_startup_el = self.browser.find_elements(By.XPATH, "//div[@id='initial_startup']")
+                    if len(initial_startup_el)==0:
                         time.sleep(1)
                         print(f"Waiting for login redirect title {LOGIN_REDIRECT_TITLE}!")
                         if not self.is_page_ready(LOGIN_REDIRECT_TITLE):
@@ -330,11 +559,11 @@ class WhatsAppSendMsg:
                         time.sleep(3)
                         return True
                     else:
-                        print("Scanning not done yet! Please scan the QR code...")
+                        print("Not logged in yet. Possible reasons: \n1> Scanning not done yet! Please scan the QR code...\n2> Slow network, still loading...")
         return self.cleanup_session_login()
         
     def click_send(self):
-        by_tuple = (By.XPATH, f"//div[@id='main']//footer//div[@data-testid='compose-box']//button[@data-testid='compose-btn-send']")
+        by_tuple = (By.XPATH, f"//div[@id='main']//footer//button[@aria-label='Send']")
         el = self.get_clickable_element(by_tuple)
         if el:
             el.click()
@@ -363,7 +592,10 @@ class WhatsAppSendMsg:
                         print("Total Sheets:", len(sheets))
                         for sheet in sheets:
                             df = pd.read_excel(f, sheet_name=sheet)
+                            print(df)
                             try:
+                                print(CONTACT_NUMBER_COLUMN_NAME, CONTACT_NUMBER_COLUMN_NAME in df)
+                                print(CONTACT_NAME_COLUMN_NAME, CONTACT_NAME_COLUMN_NAME in df)
                                 if CONTACT_NUMBER_COLUMN_NAME in df and CONTACT_NAME_COLUMN_NAME in df:
                                     contact_numbers = list(df[CONTACT_NUMBER_COLUMN_NAME])
                                     contact_names = list(df[CONTACT_NAME_COLUMN_NAME])
