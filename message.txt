@@ -1,3 +1,0 @@
-Hi %s,
-This is testing
-Thank you

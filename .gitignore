@@ -160,4 +160,8 @@ cython_debug/
 #.idea/
 
 contacts/*
+message/images/*
 user-data/
+body.txt
+!contacts/Contacts Template.xlsx
+!message/images/image_template.jpg

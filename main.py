@@ -3,30 +3,33 @@
 
 import os
 import sys
+import subprocess
 import signal
 import psutil
 from contextlib import suppress
 import argparse
 import time
 import random
-import tempfile
 import shutil
 import pandas as pd
 import urllib
+from io import BytesIO
+import win32clipboard
+from PIL import Image
 from weakref import finalize
 from selenium import webdriver
 from selenium.webdriver.support.wait import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException
+from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.common.service import utils
 from selenium.webdriver.chromium.service import ChromiumService
 from selenium.webdriver.chromium.options import ChromiumOptions
-from dprocess import start_detached
 from patcher import Patcher
 from settings import *
 import traceback
-
 
 
 def confirmation_input(ask_str, ask_type):
@@ -56,7 +59,7 @@ class WhatsAppSendMsg:
         self.not_ok = 0
         self.retry = 0
         self.max_retries = 3
-        self.browser_pid = None
+        self.force_kill = True
 
     def is_head_ready(self):
         ready = False
@@ -64,7 +67,10 @@ class WhatsAppSendMsg:
             WebDriverWait(self.browser, 20).until(EC.presence_of_element_located((By.TAG_NAME, "head")))
             ready = self.browser.find_element(By.TAG_NAME, "head") is not None 
         except Exception as e:
-            print("WhatsAppSendMsg.is_head_ready Error: ", e, traceback.format_exc())
+            if "Alert Text" in str(e):
+                print("############## Alert detected.")
+            else:
+                print("WhatsAppSendMsg.is_head_ready Error: ", e, traceback.format_exc())
         print("Head Ready?: ", "Yes" if ready else "No")
         return ready
 
@@ -109,7 +115,11 @@ class WhatsAppSendMsg:
                 pass
             ready = self.browser.find_element(By.TAG_NAME, "body") is not None
         except Exception as e:
-            print("WhatsAppSendMsg.is_dom_ready Error: ", e, traceback.format_exc())
+            if "Alert Text" in str(e):
+                print("############## Alert detected.")
+
+            else:
+                print("WhatsAppSendMsg.is_dom_ready Error: ", e, traceback.format_exc())
         print("Dom Ready?: ", "Yes" if ready else "No")
         return ready        
 
@@ -144,7 +154,8 @@ class WhatsAppSendMsg:
                 ready = self.is_head_ready() and self.is_dom_ready() and self.is_title_valid(title=title, invalid_title=invalid_title)
                 if ready:
                     break
-            except:
+            except Exception as e:
+                print("is_page_ready Error: ", e, traceback.format_exc())
                 ready = False
         print("Page Ready Status:", "Yes" if ready else "No")
         return ready
@@ -183,13 +194,9 @@ class WhatsAppSendMsg:
             if hasattr(self, "browser") and self.browser is not None:
                 print("Killing browser instances and process")
                 try:
-                    pid = int(self.browser.service.process.id)
+                    pid = int(self.browser.service.process.pid)
                 except:
                     pid = None
-                try:
-                    self.browser.service.process.send_signal(signal.SIGTERM)
-                except:
-                    pass
                 try:
                     self.browser.close()
                 except:
@@ -199,14 +206,27 @@ class WhatsAppSendMsg:
                 except:
                     pass
                 try:
-                    if pid is not None:
-                        os.kill(pid, signal.SIGTERM)
+                    self.browser.service.process.terminate()
+                except:
+                    pass                
+                try:
+                    self.browser.service.process.kill()
                 except:
                     pass
-            try:
-                self.browser.service.process.kill()
-            except:
-                pass
+                try:
+                    self.browser.service.process.send_signal(signal.SIGTERM)
+                except:
+                    pass
+                try:
+                    if pid is not None:
+                        os.kill(pid, signal.SIGTERM)
+                except PermissionError:
+                    try:
+                        subprocess.check_output("Taskkill /PID %d /F" % pid)
+                    except:
+                        pass
+                except:
+                    pass
 
             if all:
                 try:
@@ -224,28 +244,21 @@ class WhatsAppSendMsg:
                 except:
                     pass
         except:
-            pass
-
-        try:
-            if self.browser_pid is not None:
-                os.kill(self.browser_pid, signal.SIGTERM)
-        except:
-            pass
-        finally:
-            try:
-                if self.browser_pid is not None:
-                    from dprocess import REGISTERED
-                    if self.browser_pid in REGISTERED:
-                        REGISTERED.remove(self.browser_pid)
-            except:
-                pass        
+            pass        
 
         if hasattr(self, "browser"):
-            if self.browser is None or not hasattr(self.browser, "service") or self.browser.service:
+            if self.browser is None or not hasattr(self.browser, "service") or (
+                self.browser is not None and
+                hasattr(self.browser, "service") and
+                not self.browser.service.is_connectable()):
                 print("Browser closed and webdriver process killed!")
                 self.browser = None
             else:
                 print("Browser and Webdriver process NOT killed !!!!")
+                if self.force_kill:
+                    self.force_kill = False
+                    self.kill_browser_process(all=True)
+
 
 
     def _configure_headless(self):
@@ -454,27 +467,33 @@ class WhatsAppSendMsg:
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-blink-features=AutomationControlled")
         options.add_argument("--disable-infobars")
-        user_data_dir = os.path.normpath(tempfile.mkdtemp())
-        options.add_argument(f"user-data-dir={user_data_dir}")
-        # options.add_experimental_option("useAutomationExtension", False)
-        # options.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
+        options.add_argument("--disable-notifications")
+        options.add_argument("--disable-dev-shm-usage")
+        options.add_argument('--disable-application-cache')
+        options.add_argument("--disable-session-crashed-bubble")
+        if USER_DATA_DIR.exists():
+            options.add_argument(f"user-data-dir={str(USER_DATA_DIR.absolute())}")
+        options.add_experimental_option("useAutomationExtension", False)
+        options.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
+        options.add_experimental_option("prefs", {
+            "profile.exit_type" : "Normal",
+            "profile.default_content_setting_values.notifications": 2
+        })
+
         os.environ["webdriver.chrome.driver"] = str(chrome_driver_path.absolute())
         
         desired_capabilities = options.to_capabilities()
         # print("desired_capabilities: ", desired_capabilities)
 
-        binary_location = self.find_chrome_executable()
-        if binary_location is not None:
-            options.binary_location = binary_location
-            self.browser_pid = start_detached(
-                options.binary_location, *options.arguments
-            )
+        # binary_location = self.find_chrome_executable()
+        # if binary_location is not None:
+        #     options.binary_location = binary_location
 
         service = ChromiumService(executable_path=chrome_driver_path)
-        self.browser = webdriver.chrome.webdriver.WebDriver(service=service, options=options, keep_alive=True)
+        self.browser = webdriver.chrome.webdriver.WebDriver(service=service, options=options, keep_alive=False)
         self.browser._delay = 3
-        self.browser.user_data_dir = user_data_dir
-        self.browser.keep_user_data_dir = False
+        # self.browser.user_data_dir = str(USER_DATA_DIR.absolute())
+        self.browser.keep_user_data_dir = True
         if self.invisible:
             self._configure_headless()
         # self.browser.set_page_load_timeout(self.page_load_timeout)
@@ -484,23 +503,23 @@ class WhatsAppSendMsg:
         if not self.test_browser_ok():
             self.retry += 1
             if self.retry<=self.max_retries:
+                self.kill_browser_process(all=True)
                 self.config_browser()
             else:
                 raise Exception("Failed to configure browser.")
         else:
             self.retry = 0
 
-
-    def get_prensented_elements(self, by_tuple):
+    def get_prensented_elements(self, by_tuple, timeout=10):
         els = []
         try:
-            els = WebDriverWait(self.browser, 10).until(EC.presence_of_all_elements_located(by_tuple))
+            els = WebDriverWait(self.browser, timeout).until(EC.presence_of_all_elements_located(by_tuple))
         except Exception as e:
-            print(f"WhatsAppSendMsg.get_clickable_element {e}")
+            print(f"WhatsAppSendMsg.get_prensented_elements {e}")
             els = []
         return els
 
-    def get_clickable_element(self, by_tuple):
+    def get_clickable_element(self, by_tuple, timeout=20):
         el = None
         error = ""
         sep = ""
@@ -512,7 +531,7 @@ class WhatsAppSendMsg:
             error += f"Error1: {e}"
             sep = "\n"
         try:
-            el1 = WebDriverWait(self.browser, 20).until(EC.element_to_be_clickable(by_tuple))
+            el1 = WebDriverWait(self.browser, timeout).until(EC.element_to_be_clickable(by_tuple))
             if el1 is not None:
                 el = el1
         except Exception as e:
@@ -522,6 +541,7 @@ class WhatsAppSendMsg:
             print(error)
         return el
 
+
     def cleanup_session_login(self):
         if self.is_title_valid(None) or self.is_title_valid(""):
             print("Re-configuring and Re-loging...")
@@ -529,6 +549,7 @@ class WhatsAppSendMsg:
                 self.kill_browser_process()
                 shutil.rmtree(USER_DATA_DIR)
                 USER_DATA_DIR.mkdir(exist_ok=True)
+            self.kill_browser_process(all=True)
             self.config_browser()
             return self.login()
         return False
@@ -562,43 +583,99 @@ class WhatsAppSendMsg:
                         print("Not logged in yet. Possible reasons: \n1> Scanning not done yet! Please scan the QR code...\n2> Slow network, still loading...")
         return self.cleanup_session_login()
         
-    def click_send(self):
-        by_tuple = (By.XPATH, f"//div[@id='main']//footer//button[@aria-label='Send']")
+    def is_message_link_rendered(self):
+        if MESSAGE_LINK_RENDERED_TITLE is not None and len(MESSAGE_LINK_RENDERED_TITLE)>0:
+            el = None
+            while not el:
+                by_tuple = (By.XPATH, f"//div[@id='main']//footer//div[@title='{MESSAGE_LINK_RENDERED_TITLE}']")
+                el = self.get_prensented_elements(by_tuple=by_tuple)
+                time.sleep(0.1)
+
+    def send_to_clipboard(self, clip_type, data):
+        win32clipboard.OpenClipboard()
+        win32clipboard.EmptyClipboard()
+        win32clipboard.SetClipboardData(clip_type, data)
+        win32clipboard.CloseClipboard()
+
+    def send_image_to_clipboard(self, image_name):
+        image_path = MESSAGE_IMAGE_DIR / image_name
+        if image_path.exists():
+            image = Image.open(image_path)
+            output = BytesIO()
+            image.convert("RGB").save(output, "BMP")
+            data = output.getvalue()[14:]
+            output.close()
+            self.send_to_clipboard(win32clipboard.CF_DIB, data)
+            return True
+        return False
+
+
+    def attach_message_image(self):
+        by_tuple = (By.XPATH, f"//div[@id='main']//footer//div[@title='Type a message']")
+        el = self.get_clickable_element(by_tuple=by_tuple)
+        if el:
+            el.click()
+            ActionChains(self.browser).key_down(Keys.CONTROL).send_keys('v').perform()
+
+    def click_send(self, send_button=True):
+        if send_button:
+            by_tuple = (By.XPATH, f"//div[@id='main']//footer//button[@aria-label='Send']")
+        else:
+            by_tuple = (By.XPATH, f"//div[@id='app']//div[@aria-label='Send']")
         el = self.get_clickable_element(by_tuple)
         if el:
             el.click()
-            time.sleep(2)    
-    
+            return True
+        return False
+
+    def wait_until_sent(self):
+        by_tuple = (By.XPATH, f"//div[@id='app']//span[@aria-label=' Pending ']")
+        els = self.get_prensented_elements(by_tuple=by_tuple, timeout=5)
+        while len(els)>0:
+            print("Message Pending...")
+            els = self.get_prensented_elements(by_tuple=by_tuple, timeout=1)
+        
+
     def start_sending_msg(self):
         try:
-            if not MESSAGE_FILE.exists():
-                print(f"There's not message file {MESSAGE_FILE}")
+            if not MESSAGE_BODY_FILE.exists():
+                print(f"There's not message body file {MESSAGE_BODY_FILE}")
                 return
-            message = None
-            with open(MESSAGE_FILE, "r", encoding="utf-8") as f:
-                message = f.read()
-            if message is None or len(message)==0:
-                print(f"There's no message in message file {MESSAGE_FILE}")
+            message_body = None
+            with open(MESSAGE_BODY_FILE, "r", encoding="utf-8") as f:
+                message_body = f.read()
+            if message_body is None or len(message_body)==0:
+                print(f"There's no body in message body file {MESSAGE_BODY_FILE}")
                 return
-            print("Message to send: ", message)
+            print("Message body to send: ", message_body)
             
             contact_numbers = []
             contact_names = []
             if CONTACT_FOLDER_PATH.exists():
                 for f in CONTACT_FOLDER_PATH.iterdir():
+                    filename = f.name
+                    if filename.startswith('~$') or filename=='Contacts Template.xlsx':continue
                     if f.is_file() and f.suffix=='.xlsx':
-                        print(f"Processing {f.name}")
+                        print(f"Processing {filename}")
                         sheets = list(pd.read_excel(f, sheet_name=None))
                         print("Total Sheets:", len(sheets))
                         for sheet in sheets:
                             df = pd.read_excel(f, sheet_name=sheet)
-                            print(df)
                             try:
-                                print(CONTACT_NUMBER_COLUMN_NAME, CONTACT_NUMBER_COLUMN_NAME in df)
-                                print(CONTACT_NAME_COLUMN_NAME, CONTACT_NAME_COLUMN_NAME in df)
-                                if CONTACT_NUMBER_COLUMN_NAME in df and CONTACT_NAME_COLUMN_NAME in df:
+                                has_contact_number_col = CONTACT_NUMBER_COLUMN_NAME in df
+                                has_contact_name_col = CONTACT_NAME_COLUMN_NAME in df
+                                has_image_name_col = IMAGE_NAME_COLUMN_NAME in df
+                                if has_contact_number_col and has_contact_name_col and has_image_name_col:
                                     contact_numbers = list(df[CONTACT_NUMBER_COLUMN_NAME])
                                     contact_names = list(df[CONTACT_NAME_COLUMN_NAME])
+                                    image_names = list(df[IMAGE_NAME_COLUMN_NAME])
+                                else:
+                                    if not has_contact_number_col:
+                                        raise Exception(f"{filename} has missing column: '{CONTACT_NUMBER_COLUMN_NAME}'")
+                                    elif not has_contact_name_col:
+                                        raise Exception(f"{filename} has missing column: '{CONTACT_NAME_COLUMN_NAME}'")
+                                    elif not has_image_name_col:
+                                        raise Exception(f"{filename} has missing column: '{IMAGE_NAME_COLUMN_NAME}'")
                             except Exception as e:
                                 print("WhatsAppSendMsg.start_sending_msg Error: ", e, traceback.format_exc())
             if len(contact_numbers)==0:
@@ -622,26 +699,51 @@ class WhatsAppSendMsg:
             if self.login():
                 print("Logged in")
                 WebDriverWait(self.browser, 20).until(EC.presence_of_element_located((By.TAG_NAME, "title")))
+                previous_image_name = None 
+                is_image_in_clipboard = False
                 for i, contact_number in enumerate(contact_numbers):
+                    if contact_number is None:
+                        continue
                     contact_number = str(contact_number).strip()
-                    contact_name = str(contact_names[i]).strip()
+                    contact_name = contact_names[i]
+                    if contact_name is None:
+                        contact_name = ""
+                    contact_name = str(contact_name).strip()
+                    image_name = image_names[i]
+                    if image_name is not None:
+                        image_name = str(image_name).strip()
+                        if len(image_name)==0:
+                            is_image_in_clipboard = False
+                        elif previous_image_name!=image_name:
+                            is_image_in_clipboard = self.send_image_to_clipboard(image_name)
+                            if is_image_in_clipboard:
+                                previous_image_name = image_name
+                    elif image_name is None:
+                        is_image_in_clipboard = False
+
                     if not contact_number.startswith("+91"):
                         contact_number = f"+91{contact_number.lstrip('91')}"
                     print(f"Processing {contact_name}, {contact_number}")
                     try:
-                        text = urllib.parse.urlencode({'text' : message % (contact_name, )})
+                        text = urllib.parse.urlencode({'text' : message_body.format(contact_name=contact_name)})
                         send_url = SEND_URL % (contact_number, text)
                         if self.get_page(send_url, LOGIN_TITLE):
-                            time.sleep(1)
-                            self.click_send()
-                            print(f"######################## SENT TO: {contact_name}, {contact_number} ########################")
+                            if is_image_in_clipboard:
+                                self.attach_message_image()
+                            else:
+                                self.is_message_link_rendered()
+                            if self.click_send(send_button=not is_image_in_clipboard):
+                                self.wait_until_sent()
+                                print(f"######################## SENT TO: {contact_name}, {contact_number} ########################")
+                            else:
+                                print(f"######################## Falied to SENT TO: {contact_name}, {contact_number} ########################")
                     except Exception as e:
                         print("WhatsAppSendMsg.start_sending_msg Error1: ", e, traceback.format_exc())
                     print()
                 print("######################## COMPLETED ########################")
         except Exception as e:
             print("WhatsAppSendMsg.start_sending_msg Error2: ", e, traceback.format_exc())
-        self.kill_browser_process()
+        # self.kill_browser_process()
             
 
 
@@ -660,9 +762,21 @@ if __name__ == "__main__":
         help="Run script with visible mode, default: visible"
     )
 
+    parser.add_argument(
+        "-d",
+        "--debug",
+        dest="DEBUG",
+        action='store_true',
+        default=False,
+        required=False,
+        help="Run script with debug mode, default: off"
+    )
+
     args = parser.parse_args(argv[1:])
     print(parser.description)
     INVISIBLE = args.INVISIBLE
+    DEBUG = args.DEBUG
     print("INVISIBLE: ", INVISIBLE)
-    wp_scraper = WhatsAppSendMsg(invisible=INVISIBLE)
+    print("DEBUG: ", DEBUG)
+    wp_scraper = WhatsAppSendMsg(invisible=INVISIBLE, debug=DEBUG)
     wp_scraper.start_sending_msg()

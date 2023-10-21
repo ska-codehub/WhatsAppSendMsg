@@ -28,7 +28,7 @@ USER_DATA_DIR = CHROME_DIR / "user-data"
 CONTACT_FOLDER_PATH = BASE_DIR / "contacts"
 
 CHROME_DIR.mkdir(exist_ok=True)
-USER_DATA_DIR.mkdir(exist_ok=True)
+USER_DATA_DIR.mkdir(mode=777, exist_ok=True)
 CONTACT_FOLDER_PATH.mkdir(exist_ok=True)
 
 config = configparser.RawConfigParser()
@@ -45,7 +45,10 @@ LOGIN_REDIRECT_TITLE = SETTINGS.get('login_redirect_title').strip()
 SEND_URL = SETTINGS.get('send_url').strip()
 CONTACT_NUMBER_COLUMN_NAME = SETTINGS.get('contact_number_column_name').strip()
 CONTACT_NAME_COLUMN_NAME = SETTINGS.get('contact_name_column_name').strip()
-MESSAGE_FILE = BASE_DIR / SETTINGS.get('message_file').strip()
+IMAGE_NAME_COLUMN_NAME = SETTINGS.get('image_name_column_name').strip()
+MESSAGE_BODY_FILE = BASE_DIR / 'message' / SETTINGS.get('message_body_file').strip()
+MESSAGE_IMAGE_DIR = BASE_DIR / 'message' / SETTINGS.get('message_image_folder').strip()
+MESSAGE_LINK_RENDERED_TITLE = SETTINGS.get('message_link_rendered_title').strip()
 
 HEALTH_CHECK_URL = SETTINGS.get('health_check_url').strip()
 HEALTH_CHECK_TITLE = SETTINGS.get('health_check_title').strip()
