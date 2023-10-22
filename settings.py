@@ -46,10 +46,14 @@ SEND_URL = SETTINGS.get('send_url').strip()
 CONTACT_NUMBER_COLUMN_NAME = SETTINGS.get('contact_number_column_name').strip()
 CONTACT_NAME_COLUMN_NAME = SETTINGS.get('contact_name_column_name').strip()
 IMAGE_NAME_COLUMN_NAME = SETTINGS.get('image_name_column_name').strip()
+STATUS_COLUMN_NAME = SETTINGS.get('status_column_name').strip()
 MESSAGE_BODY_FILE = BASE_DIR / 'message' / SETTINGS.get('message_body_file').strip()
 MESSAGE_IMAGE_DIR = BASE_DIR / 'message' / SETTINGS.get('message_image_folder').strip()
 MESSAGE_LINK_RENDERED_TITLE = SETTINGS.get('message_link_rendered_title').strip()
+COUNTRY_CODE = SETTINGS.get('country_code').strip()
 
 HEALTH_CHECK_URL = SETTINGS.get('health_check_url').strip()
 HEALTH_CHECK_TITLE = SETTINGS.get('health_check_title').strip()
-
+ACTIVE_HOURS = float(SETTINGS.get('active_hours').strip())
+PROCESSING_DURATION_EARCH_ROWS_SECS = float(SETTINGS.get('processing_duration_earch_rows_secs').strip())
+NUMBER_OF_ROWS_TO_PROCESS = ACTIVE_HOURS*3600/PROCESSING_DURATION_EARCH_ROWS_SECS

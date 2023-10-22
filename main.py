@@ -12,10 +12,9 @@ import time
 import random
 import shutil
 import pandas as pd
+import numpy as np
 import urllib
-from io import BytesIO
-import win32clipboard
-from PIL import Image
+from copy import deepcopy
 from weakref import finalize
 from selenium import webdriver
 from selenium.webdriver.support.wait import WebDriverWait
@@ -28,28 +27,9 @@ from selenium.webdriver.common.service import utils
 from selenium.webdriver.chromium.service import ChromiumService
 from selenium.webdriver.chromium.options import ChromiumOptions
 from patcher import Patcher
+from utils import *
 from settings import *
 import traceback
-
-
-def confirmation_input(ask_str, ask_type):
-    if ask_type not in ['Y/n', 'y/N', 'N/y', 'n/Y']:
-        ask_type = 'Y/n'
-    ask_str = f"{ask_str} [{ask_type}]: "
-    while True:
-        ask_value = input(ask_str).lower()
-        if not ask_value in [''] + TRUTHY + FALSY:
-            print("Please provide a valid confirmation!")
-            continue
-        if ask_type == 'Y/n':
-            return ask_value in [''] + TRUTHY
-        elif ask_type == 'y/N':
-            return ask_value in TRUTHY
-        elif ask_type == 'N/y':
-            return ask_value in TRUTHY
-        elif ask_type == 'n/Y':
-            return ask_value in [''] + TRUTHY
-
 
 class WhatsAppSendMsg:
     def __init__(self, invisible=True, debug=False) -> None:
@@ -591,25 +571,6 @@ class WhatsAppSendMsg:
                 el = self.get_prensented_elements(by_tuple=by_tuple)
                 time.sleep(0.1)
 
-    def send_to_clipboard(self, clip_type, data):
-        win32clipboard.OpenClipboard()
-        win32clipboard.EmptyClipboard()
-        win32clipboard.SetClipboardData(clip_type, data)
-        win32clipboard.CloseClipboard()
-
-    def send_image_to_clipboard(self, image_name):
-        image_path = MESSAGE_IMAGE_DIR / image_name
-        if image_path.exists():
-            image = Image.open(image_path)
-            output = BytesIO()
-            image.convert("RGB").save(output, "BMP")
-            data = output.getvalue()[14:]
-            output.close()
-            self.send_to_clipboard(win32clipboard.CF_DIB, data)
-            return True
-        return False
-
-
     def attach_message_image(self):
         by_tuple = (By.XPATH, f"//div[@id='main']//footer//div[@title='Type a message']")
         el = self.get_clickable_element(by_tuple=by_tuple)
@@ -635,7 +596,6 @@ class WhatsAppSendMsg:
             print("Message Pending...")
             els = self.get_prensented_elements(by_tuple=by_tuple, timeout=1)
         
-
     def start_sending_msg(self):
         try:
             if not MESSAGE_BODY_FILE.exists():
@@ -648,99 +608,151 @@ class WhatsAppSendMsg:
                 print(f"There's no body in message body file {MESSAGE_BODY_FILE}")
                 return
             print("Message body to send: ", message_body)
-            
-            contact_numbers = []
-            contact_names = []
-            if CONTACT_FOLDER_PATH.exists():
-                for f in CONTACT_FOLDER_PATH.iterdir():
-                    filename = f.name
-                    if filename.startswith('~$') or filename=='Contacts Template.xlsx':continue
-                    if f.is_file() and f.suffix=='.xlsx':
-                        print(f"Processing {filename}")
-                        sheets = list(pd.read_excel(f, sheet_name=None))
-                        print("Total Sheets:", len(sheets))
-                        for sheet in sheets:
-                            df = pd.read_excel(f, sheet_name=sheet)
-                            try:
-                                has_contact_number_col = CONTACT_NUMBER_COLUMN_NAME in df
-                                has_contact_name_col = CONTACT_NAME_COLUMN_NAME in df
-                                has_image_name_col = IMAGE_NAME_COLUMN_NAME in df
-                                if has_contact_number_col and has_contact_name_col and has_image_name_col:
-                                    contact_numbers = list(df[CONTACT_NUMBER_COLUMN_NAME])
-                                    contact_names = list(df[CONTACT_NAME_COLUMN_NAME])
-                                    image_names = list(df[IMAGE_NAME_COLUMN_NAME])
-                                else:
-                                    if not has_contact_number_col:
-                                        raise Exception(f"{filename} has missing column: '{CONTACT_NUMBER_COLUMN_NAME}'")
-                                    elif not has_contact_name_col:
-                                        raise Exception(f"{filename} has missing column: '{CONTACT_NAME_COLUMN_NAME}'")
-                                    elif not has_image_name_col:
-                                        raise Exception(f"{filename} has missing column: '{IMAGE_NAME_COLUMN_NAME}'")
-                            except Exception as e:
-                                print("WhatsAppSendMsg.start_sending_msg Error: ", e, traceback.format_exc())
-            if len(contact_numbers)==0:
-                print("There's no contact number to process.")
-                return
-            if len(contact_numbers)!=len(contact_names):
-                print(f"Each contact number should be mapped to a contact name and vice-versa.\nTotal count of contact numbers: {len(contact_numbers)}, Total count of contact names: {len(contact_names)}")
-                return
-            max_retries = 3
-            retry = 0
-            while True:
-                try:
-                    self.config_browser()
-                    break
-                except Exception as e:
-                    print("WhatsAppSendMsg.start_sending_msg Error: ", e, traceback.format_exc())
-                    retry += 1
-                if retry>max_retries:
-                    raise Exception("Browser can't be configured at this moment!")
-            time.sleep(1)
-            if self.login():
-                print("Logged in")
-                WebDriverWait(self.browser, 20).until(EC.presence_of_element_located((By.TAG_NAME, "title")))
-                previous_image_name = None 
-                is_image_in_clipboard = False
-                for i, contact_number in enumerate(contact_numbers):
-                    if contact_number is None:
-                        continue
-                    contact_number = str(contact_number).strip()
-                    contact_name = contact_names[i]
-                    if contact_name is None:
-                        contact_name = ""
-                    contact_name = str(contact_name).strip()
-                    image_name = image_names[i]
-                    if image_name is not None:
-                        image_name = str(image_name).strip()
-                        if len(image_name)==0:
-                            is_image_in_clipboard = False
-                        elif previous_image_name!=image_name:
-                            is_image_in_clipboard = self.send_image_to_clipboard(image_name)
-                            if is_image_in_clipboard:
-                                previous_image_name = image_name
-                    elif image_name is None:
-                        is_image_in_clipboard = False
 
-                    if not contact_number.startswith("+91"):
-                        contact_number = f"+91{contact_number.lstrip('91')}"
-                    print(f"Processing {contact_name}, {contact_number}")
+            if CONTACT_FOLDER_PATH.exists():            
+                max_retries = 3
+                retry = 0
+                while True:
                     try:
-                        text = urllib.parse.urlencode({'text' : message_body.format(contact_name=contact_name)})
-                        send_url = SEND_URL % (contact_number, text)
-                        if self.get_page(send_url, LOGIN_TITLE):
-                            if is_image_in_clipboard:
-                                self.attach_message_image()
-                            else:
-                                self.is_message_link_rendered()
-                            if self.click_send(send_button=not is_image_in_clipboard):
-                                self.wait_until_sent()
-                                print(f"######################## SENT TO: {contact_name}, {contact_number} ########################")
-                            else:
-                                print(f"######################## Falied to SENT TO: {contact_name}, {contact_number} ########################")
+                        self.config_browser()
+                        break
                     except Exception as e:
-                        print("WhatsAppSendMsg.start_sending_msg Error1: ", e, traceback.format_exc())
-                    print()
-                print("######################## COMPLETED ########################")
+                        print("WhatsAppSendMsg.start_sending_msg Error: ", e, traceback.format_exc())
+                        retry += 1
+                    if retry>max_retries:
+                        raise Exception("Browser can't be configured at this moment!")
+                if self.login():
+                    WebDriverWait(self.browser, 20).until(EC.presence_of_element_located((By.TAG_NAME, "title")))
+                    print("Logged in")
+                    file_process_durations = []
+                    chunk_process_durations = []
+                    row_process_durations = []
+                    start_time = time.time()
+                    for f in CONTACT_FOLDER_PATH.iterdir():
+                        filename = f.name
+                        if filename.startswith('~$') or filename=='Contacts Template.xlsx':continue
+                        if f.is_file() and f.suffix=='.xlsx':
+                            if not confirmation_input(f"Process {filename}?", 'N/y'):continue
+                            start_time1 = time.time()
+                            print(f"Processing {filename}")
+                            sheets = list(pd.read_excel(f, sheet_name=None))
+                            print("Total Sheets:", len(sheets))
+                            previous_image_name = None 
+                            is_image_in_clipboard = False                        
+                            sheets_df = {}
+                            for sheet in sheets:
+                                orginal_df = pd.read_excel(f, sheet_name=sheet)
+                                df = deepcopy(orginal_df)
+                                try:
+                                    has_contact_number_col = CONTACT_NUMBER_COLUMN_NAME in df
+                                    has_contact_name_col = CONTACT_NAME_COLUMN_NAME in df
+                                    has_image_name_col = IMAGE_NAME_COLUMN_NAME in df
+                                    has_status_col = STATUS_COLUMN_NAME in df
+                                    if has_contact_number_col and has_contact_name_col and has_image_name_col and has_status_col:
+                                        size = roundoff(NUMBER_OF_ROWS_TO_PROCESS)
+                                        chunks = chunker(df, size)
+                                        no_of_chunks = roundoff(len(df)/NUMBER_OF_ROWS_TO_PROCESS)
+                                        if no_of_chunks==0:
+                                            no_of_chunks = 1
+                                        print("no_of_chunks: ", no_of_chunks, NUMBER_OF_ROWS_TO_PROCESS, size)
+                                        for i, chunk in enumerate(chunks):
+                                            if not confirmation_input(f"Process chunk {i+1}/{no_of_chunks} of sheet '{sheet}'?", 'N/y'):continue
+                                            print(f"Processing chunk {i+1}/{no_of_chunks} of sheet '{sheet}'")
+                                            start_time2 = time.time()
+                                            for row in chunk.iterrows():
+                                                start_time3 = time.time()
+                                                status = "Unknown"
+                                                idx = row[0]
+                                                r = row[1]
+                                                contact_number = r[CONTACT_NUMBER_COLUMN_NAME]
+                                                contact_name = r[CONTACT_NAME_COLUMN_NAME]
+                                                image_name = r[IMAGE_NAME_COLUMN_NAME]
+                                                if pd.isnull(contact_number):continue
+                                                if pd.isnull(contact_name):
+                                                    contact_name = ""
+                                                if pd.isnull(image_name):
+                                                    image_name = None
+                                                    is_image_in_clipboard = False
+                                                else:
+                                                    image_name = str(image_name).strip()
+                                                    if len(image_name)==0:
+                                                        is_image_in_clipboard = False
+                                                    elif previous_image_name!=image_name:
+                                                        is_image_in_clipboard = send_image_to_clipboard(
+                                                            image_dir=MESSAGE_IMAGE_DIR, 
+                                                            image_name=image_name
+                                                        )
+                                                        if is_image_in_clipboard:
+                                                            previous_image_name = image_name
+                                                contact_number = str(contact_number).strip()
+                                                contact_name = str(contact_name).strip()
+                                                if not contact_number.startswith(f"+{COUNTRY_CODE}"):
+                                                    contact_number = f"+{COUNTRY_CODE}{contact_number.lstrip(COUNTRY_CODE)}"
+                                                print(f"Processing {contact_name}, {contact_number}")
+                                                try:
+                                                    text = urllib.parse.urlencode({'text' : message_body.format(contact_name=contact_name)})
+                                                    send_url = SEND_URL % (contact_number, text)
+                                                    if self.get_page(send_url, LOGIN_TITLE):
+                                                        if is_image_in_clipboard:
+                                                            self.attach_message_image()
+                                                        else:
+                                                            self.is_message_link_rendered()
+                                                        if self.click_send(send_button=not is_image_in_clipboard):
+                                                            self.wait_until_sent()
+                                                            print(f"######################## SENT TO: {contact_name}, {contact_number} ########################")
+                                                            status = "Success"
+                                                        else:
+                                                            print(f"######################## Falied to SENT TO: {contact_name}, {contact_number} ########################")
+                                                            status = "Fail"
+                                                except Exception as e:
+                                                    print("WhatsAppSendMsg.start_sending_msg Error1: ", e, traceback.format_exc())
+                                                    status = "Fail"
+                                                orginal_df[STATUS_COLUMN_NAME][idx] = status
+                                                row_process_duration = time.time()-start_time3
+                                                row_process_durations.append(row_process_duration)
+                                            chunk_process_duration = time.time()-start_time2
+                                            chunk_process_durations.append(chunk_process_duration)
+                                            print(f"Processing of chunk {i+1}/{no_of_chunks} of sheet '{sheet}' took: {chunk_process_duration} seconds.")
+                                    else:
+                                        if not has_contact_number_col:
+                                            raise Exception(f"{filename} has missing column: '{CONTACT_NUMBER_COLUMN_NAME}'")
+                                        elif not has_contact_name_col:
+                                            raise Exception(f"{filename} has missing column: '{CONTACT_NAME_COLUMN_NAME}'")
+                                        elif not has_image_name_col:
+                                            raise Exception(f"{filename} has missing column: '{IMAGE_NAME_COLUMN_NAME}'")
+                                        elif not has_status_col:
+                                            raise Exception(f"{filename} has missing column: '{STATUS_COLUMN_NAME}'")      
+                                except Exception as e:
+                                    print("WhatsAppSendMsg.start_sending_msg Error2 : ", e, traceback.format_exc())
+                                sheets_df[sheet] = orginal_df
+                            file_process_duration = time.time() - start_time1
+                            file_process_durations.append(file_process_duration)
+                            print(f"Processing of filename '{filename}' took: {file_process_duration} seconds.")
+
+                            if confirmation_input(f"\n###################### Please close '{filename}' if it's opened anywhere. ######################\nClosed?", 'N/y'):
+                                with pd.ExcelWriter(f, engine="openpyxl", mode="w") as writer:
+                                    for sheet, df in sheets_df.items():
+                                        df.to_excel(writer, sheet_name=sheet, index=False)
+
+                    print(f"""Row processing duration metrics:
+                          Max: {max(row_process_durations)}
+                          Min: {min(row_process_durations)}
+                          Avg: {np.average(row_process_durations)}
+                          Mean: {np.mean(row_process_durations)}""")
+                    print(f"""Chunk processing duration metrics:
+                          Max: {max(chunk_process_durations)}
+                          Min: {min(chunk_process_durations)}
+                          Avg: {np.average(chunk_process_durations)}
+                          Mean: {np.mean(chunk_process_durations)}""")
+                    print(f"""File processing duration metrics:
+                          Max: {max(file_process_durations)}
+                          Min: {min(file_process_durations)}
+                          Avg: {np.average(file_process_durations)}
+                          Mean: {np.mean(file_process_durations)}""")
+                    print(f"Total processing time: {time.time() -start_time} seconds.")                
+                    print("######################## COMPLETED ########################")
+                else:
+                    print("Couldn't log in !!!")
         except Exception as e:
             print("WhatsAppSendMsg.start_sending_msg Error2: ", e, traceback.format_exc())
         # self.kill_browser_process()
